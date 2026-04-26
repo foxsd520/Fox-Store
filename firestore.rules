@@ -1,0 +1,103 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Phase 3: Global Helpers
+    function isSignedIn() { return request.auth != null; }
+    function isVerified() { return isSignedIn() && request.auth.token.email_verified == true; }
+    function isOwner(userId) { return isSignedIn() && request.auth.uid == userId; }
+    function isAdmin() { 
+      return isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+
+    // --- Users Collection ---
+    match /users/{userId} {
+      function isValidUser(data) {
+        return data.keys().hasAll(['id', 'email', 'name', 'role', 'createdAt']) && 
+               data.id is string &&
+               data.email is string &&
+               data.role in ['user', 'developer', 'owner'] &&
+               data.createdAt is number &&
+               (data.phoneNumber == null || data.phoneNumber is string);
+      }
+
+      allow get: if isSignedIn();
+      allow list: if isSignedIn();
+      allow create: if isSignedIn() && isValidUser(incoming()) && 
+                    (incoming().role != 'owner' || request.auth.token.email == 'foxsd520@gmail.com');
+      allow update: if (isSignedIn() && isValidUser(incoming()) && (
+        (isOwner(userId) && incoming().role == existing().role && incoming().email == existing().email) || 
+        isAdmin()
+      ));
+      allow delete: if isAdmin();
+    }
+
+    // --- Messages Collection ---
+    match /messages/{messageId} {
+      function isValidMessage(data) {
+        return data.keys().hasAll(['senderId', 'senderName', 'receiverId', 'text', 'timestamp']) &&
+               data.senderId == request.auth.uid &&
+               data.text is string && data.text.size() <= 2000;
+      }
+      allow create: if isSignedIn() && isValidMessage(incoming());
+      
+      // Explicitly allow list if the query filters by senderId or receiverId matching the user
+      allow list: if isSignedIn() && (
+        resource.data.receiverId == request.auth.uid || 
+        resource.data.senderId == request.auth.uid
+      );
+      allow get: if isSignedIn() && (
+        resource.data.receiverId == request.auth.uid || 
+        resource.data.senderId == request.auth.uid ||
+        isAdmin()
+      );
+    }
+
+    // --- Apps Collection ---
+    match /apps/{appId} {
+      function isValidApp(data) {
+        return data.keys().hasAll(['name', 'publisherId', 'type', 'url', 'category', 'createdAt', 'publisherName', 'description']) &&
+               data.name is string &&
+               data.publisherId is string &&
+               data.type in ['apk', 'link'] &&
+               data.category in ['ألعاب', 'أدوات'] &&
+               data.createdAt is number;
+      }
+
+      allow read: if true;
+      allow create: if isSignedIn() && isValidApp(incoming()) && incoming().publisherId == request.auth.uid;
+      allow update: if (isSignedIn() && (
+        isAdmin() || 
+        (existing().publisherId == request.auth.uid && incoming().publisherId == existing().publisherId) ||
+        (incoming().diff(existing()).affectedKeys().hasOnly(['likes', 'downloads', 'rating', 'reviewCount']))
+      ));
+      allow delete: if isAdmin() || (isSignedIn() && existing().publisherId == request.auth.uid);
+      
+      // Reviews Subcollection
+      match /reviews/{reviewId} {
+        function isValidReview(data) {
+          return data.keys().hasAll(['appId', 'userId', 'userName', 'rating', 'comment', 'createdAt']) &&
+                 data.rating >= 1 && data.rating <= 5 &&
+                 data.userId == request.auth.uid;
+        }
+        allow read: if true;
+        allow create: if isSignedIn() && isValidReview(incoming());
+        allow delete: if isAdmin() || (isSignedIn() && existing().userId == request.auth.uid);
+      }
+    }
+
+    // --- Admins Collection ---
+    match /admins/{adminId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && (request.auth.token.email == 'foxsd520@gmail.com' || isAdmin());
+      allow update, delete: if isAdmin();
+    }
+  }
+}
